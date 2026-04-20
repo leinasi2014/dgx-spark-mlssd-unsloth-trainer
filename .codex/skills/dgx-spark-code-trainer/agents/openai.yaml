@@ -1,0 +1,3 @@
+interface:
+  display_name: "DGX Spark Code Trainer"
+  short_description: "Run SSD -> Unsloth -> LoRA-Squeeze code training workflows on this repo"

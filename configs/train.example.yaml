@@ -1,0 +1,123 @@
+run_name: carnice-qwen36-code-boost-v3
+
+model:
+  base_model: samuelcardillo/Carnice-Qwen3.6-MoE-35B-A3B
+  trust_remote_code: true
+  max_seq_length: 16384
+  load_in_4bit: true
+  bf16: true
+  unsloth_loader: auto
+
+paths:
+  project_root: ..
+  output_root: runs
+  prompt_dataset: data/prompts/code_prompts.jsonl
+  skill_task_dataset: data/skill0/skill_tasks.jsonl
+  ssd_train_jsonl: runs/${run_name}/ssd_train.jsonl
+  skill0_train_jsonl: runs/${run_name}/skill0_train.jsonl
+  mixed_train_jsonl: runs/${run_name}/mixed_train.jsonl
+  eval_dataset: data/eval/code_eval.jsonl
+  ml_ssd_repo: third_party/ml-ssd
+
+ssd:
+  model_for_generation: samuelcardillo/Carnice-Qwen3.6-MoE-35B-A3B
+  samples_per_prompt: 4
+  temperature: 1.0
+  top_p: 0.8
+  top_k: 20
+  repetition_penalty: 1.0
+  max_new_tokens: 4096
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.85
+  filter_shortest_percent: 10
+
+training_plan:
+  mode: sequential
+  sequential:
+    code_output_subdir: adapter_code_high_rank
+    skill_output_subdir: adapter_skill0_high_rank
+    squeezed_output_subdir: adapter_skill0_squeezed
+    recovered_output_subdir: adapter_skill0_recovered
+  mixed:
+    output_subdir: adapter_mixed_high_rank
+    squeezed_output_subdir: adapter_mixed_squeezed
+    recovered_output_subdir: adapter_mixed_recovered
+
+training:
+  stage: sft
+  source_rank: 128
+  target_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.0
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  num_train_epochs: 1.5
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
+  logging_steps: 10
+  save_steps: 200
+  save_total_limit: 3
+  response_only: true
+  response_markers:
+    instruction_part: "<|im_start|>user\n"
+    response_part: "<|im_start|>assistant\n"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - in_proj_qkv
+    - in_proj_z
+    - in_proj_a
+    - in_proj_b
+    - out_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  extra_target_modules: []
+
+skill0:
+  enabled: true
+  summary_max_lines: 14
+  tool_only_max_lines: 10
+  stages:
+    - name: stage_a
+      mixture:
+        full: 0.7
+        summary: 0.2
+        tool_only: 0.1
+        zero: 0.0
+    - name: stage_b
+      mixture:
+        full: 0.4
+        summary: 0.3
+        tool_only: 0.2
+        zero: 0.1
+    - name: stage_c
+      mixture:
+        full: 0.1
+        summary: 0.3
+        tool_only: 0.2
+        zero: 0.4
+  mixed_weights:
+    code: 0.7
+    skill0: 0.3
+
+recovery:
+  enabled: true
+  max_steps_ratio: 0.08
+  learning_rate: 5.0e-6
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+
+lora_squeeze:
+  enabled: true
+  oversample_rank: 8
+  power_iterations: 2
+  save_as_safetensors: true
+
+inference:
+  temperature_sweep: [0.2, 0.4, 0.6, 0.8, 0.9]
+  top_p: 0.95
+  max_new_tokens: 1024
