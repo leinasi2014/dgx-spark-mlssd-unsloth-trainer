@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -9,12 +10,40 @@ from datasets import Dataset
 from transformers import set_seed
 from trl import SFTConfig, SFTTrainer
 
-from common import append_run_note, choose_unsloth_loader, ensure_run_dirs, load_config, load_jsonl, logger, maybe_enable_response_only
+from common import append_run_note, choose_unsloth_loader, ensure_path_is_new, ensure_run_dirs, load_config, load_jsonl, logger, maybe_enable_response_only
 
 
 def render_chat(example: dict[str, Any], tokenizer: Any) -> dict[str, str]:
     text = tokenizer.apply_chat_template(example['messages'], tokenize=False, add_generation_prompt=False)
     return {'text': text}
+
+
+def is_code_stage_dataset(cfg: dict[str, Any], dataset_path: Path) -> bool:
+    return dataset_path.resolve() == Path(cfg['paths']['ssd_train_jsonl']).resolve()
+
+
+def validate_training_guardrails(cfg: dict[str, Any], dataset_path: Path, target_modules: list[str]) -> None:
+    forbidden = [module for module in target_modules if 'router' in module.lower()]
+    if forbidden:
+        raise ValueError(f'MoE router modules are not allowed in target_modules: {forbidden}')
+    if not cfg.get('training', {}).get('response_only', True):
+        raise ValueError('response_only masking must remain enabled for training in this repository.')
+
+
+def validate_init_adapter_guardrails(init_adapter: str) -> None:
+    adapter_dir = Path(init_adapter).resolve()
+    config_path = adapter_dir / 'adapter_config.json'
+    if not config_path.exists():
+        raise FileNotFoundError(f'Missing adapter config for init adapter: {config_path}')
+    adapter_cfg = json.loads(config_path.read_text(encoding='utf-8'))
+    raw_target_modules = adapter_cfg.get('target_modules', [])
+    if isinstance(raw_target_modules, str):
+        target_modules = [raw_target_modules]
+    else:
+        target_modules = [str(module) for module in raw_target_modules]
+    forbidden = [module for module in target_modules if 'router' in module.lower()]
+    if forbidden:
+        raise ValueError(f'Init adapter targets forbidden MoE router modules: {forbidden}')
 
 
 def main() -> None:
@@ -29,6 +58,9 @@ def main() -> None:
     cfg = load_config(args.config)
     run_dir = ensure_run_dirs(cfg)
     set_seed(args.seed)
+    dataset_path = Path(args.dataset_path or cfg['paths']['ssd_train_jsonl'])
+    target_modules = list(cfg['training']['target_modules']) + list(cfg['training'].get('extra_target_modules', []))
+    validate_training_guardrails(cfg, dataset_path, target_modules)
 
     loader, loader_name = choose_unsloth_loader(cfg['model']['base_model'], cfg['model'].get('unsloth_loader', 'auto'))
     logger.info('Using Unsloth loader: %s', loader_name)
@@ -41,11 +73,11 @@ def main() -> None:
 
     init_adapter = args.init_adapter
     if init_adapter:
+        validate_init_adapter_guardrails(init_adapter)
         from peft import PeftModel
         logger.info('Continuing from adapter: %s', init_adapter)
         model = PeftModel.from_pretrained(model, str(Path(init_adapter).resolve()), is_trainable=True)
     else:
-        target_modules = list(cfg['training']['target_modules']) + list(cfg['training'].get('extra_target_modules', []))
         model = loader.get_peft_model(
             model,
             r=cfg['training']['source_rank'],
@@ -57,12 +89,12 @@ def main() -> None:
             random_state=args.seed,
         )
 
-    dataset_path = Path(args.dataset_path or cfg['paths']['ssd_train_jsonl'])
     train_rows = load_jsonl(dataset_path)
     ds = Dataset.from_list(train_rows)
     ds = ds.map(lambda x: render_chat(x, tokenizer), remove_columns=ds.column_names)
 
     out_dir = run_dir / args.output_subdir
+    ensure_path_is_new(out_dir, 'training output directory')
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,

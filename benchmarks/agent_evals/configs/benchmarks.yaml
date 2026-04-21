@@ -1,0 +1,123 @@
+version: 1
+default_profile: smoke
+
+defaults:
+  max_workers: 4
+  openai_api_key_env: OPENAI_API_KEY
+  openai_base_url_env: OPENAI_BASE_URL
+
+paths:
+  external_root: .external
+  cache_root: .cache
+  runs_root: runs
+
+benchmarks:
+  swebench_verified:
+    display_name: SWE-bench Verified
+    kind: swebench_verified
+    repo_url: https://github.com/SWE-bench/SWE-bench
+    ref: f7bbbb2ccdf479001d6467c9e34af59e44a840f9
+    repo_subdir: swebench
+    default_profile: smoke
+    install_commands:
+      - "{venv_python} -m pip install --upgrade pip"
+      - "{venv_python} -m pip install -e ."
+    requires:
+      commands: [git, docker]
+    notes: "This wrapper runs the official evaluation harness. Patch generation is intentionally externalized; pass --predictions-path to evaluate your agent's outputs."
+    profiles:
+      smoke:
+        dataset_name: SWE-bench/SWE-bench_Verified
+        max_workers: 2
+        evaluation_command: "{venv_python} -m swebench.harness.run_evaluation --dataset_name {dataset_name} --predictions_path {predictions_path} --max_workers {max_workers} --run_id {upstream_run_id}"
+        summary_candidates:
+          - "evaluation_results/*.json"
+      full:
+        dataset_name: SWE-bench/SWE-bench_Verified
+        max_workers: 8
+        evaluation_command: "{venv_python} -m swebench.harness.run_evaluation --dataset_name {dataset_name} --predictions_path {predictions_path} --max_workers {max_workers} --run_id {upstream_run_id}"
+        summary_candidates:
+          - "evaluation_results/*.json"
+
+  swebench_multilingual:
+    display_name: SWE-bench Multilingual
+    kind: swebench_multilingual
+    repo_url: https://github.com/multi-swe-bench/multi-swe-bench
+    ref: 24f493f8a103e72312ded4f6b9c89f081d69cb09
+    repo_subdir: multi-swe-bench
+    default_profile: smoke
+    install_commands:
+      - "{venv_python} -m pip install --upgrade pip"
+      - "{venv_python} -m pip install -e ."
+    requires:
+      commands: [git, docker]
+    notes: "This wrapper uses the official multilingual evaluation harness and expects a patch JSONL via --predictions-path."
+    profiles:
+      smoke:
+        dataset_file: https://huggingface.co/datasets/ByteDance-Seed/Multi-SWE-bench_mini/resolve/main/data/verified_mini.jsonl
+        max_workers: 2
+        evaluation_command: "{venv_python} -m multi_swe_bench.harness.run_evaluation --config {evaluation_config_path}"
+        summary_candidates:
+          - "raw/evaluation_output/final_report.json"
+      full:
+        dataset_file: https://huggingface.co/datasets/ByteDance-Seed/Multi-SWE-bench/resolve/main/data/verified.jsonl
+        max_workers: 8
+        evaluation_command: "{venv_python} -m multi_swe_bench.harness.run_evaluation --config {evaluation_config_path}"
+        summary_candidates:
+          - "raw/evaluation_output/final_report.json"
+
+  terminal_bench:
+    display_name: Terminal-Bench 2.0
+    kind: terminal_bench
+    repo_url: https://github.com/harbor-framework/terminal-bench
+    ref: 1a6ffa9674b571da0ed040c470cb40c4d85f9b9b
+    repo_subdir: terminal-bench
+    default_profile: smoke
+    install_commands:
+      - "{venv_python} -m pip install --upgrade pip"
+      - "{venv_python} -m pip install -e ."
+    requires:
+      commands: [git, docker]
+    notes: "Terminal-Bench evolves quickly; if upstream CLI flags drift, update this config instead of editing the wrapper code."
+    profiles:
+      smoke:
+        max_workers: 2
+        run_command: "{venv_bin}/tb run --agent terminus --model {model_name} --dataset-name terminal-bench-core --dataset-version 0.1.1 --n-concurrent {max_workers}"
+        summary_candidates:
+          - "**/*summary*.json"
+          - "**/*results*.json"
+      full:
+        max_workers: 8
+        run_command: "{venv_bin}/tb run --agent terminus --model {model_name} --dataset-name terminal-bench-core --dataset-version 0.1.1 --n-concurrent {max_workers}"
+        summary_candidates:
+          - "**/*summary*.json"
+          - "**/*results*.json"
+
+  mcpmark:
+    display_name: MCPMark
+    kind: mcpmark
+    repo_url: https://github.com/eval-sys/mcpmark
+    ref: adc5e6558f05c4c9a4d5ebc58062da0b2391dc30
+    repo_subdir: mcpmark
+    default_profile: smoke
+    install_commands:
+      - "{venv_python} -m pip install --upgrade pip"
+      - "{venv_python} -m pip install -e ."
+    requires:
+      commands: [git, docker]
+    notes: "Smoke defaults to Filesystem easy tasks because it is zero-credential. Full can be expanded in config to cross-service runs once credentials are ready."
+    profiles:
+      smoke:
+        max_workers: 2
+        run_command: "{venv_python} -m pipeline --exp-name {upstream_run_id} --mcp filesystem --task-suite easy --tasks all --models {model_name} --k 1"
+        post_run_commands:
+          - "{venv_python} -m src.aggregators.aggregate_results --exp-name {upstream_run_id}"
+        summary_candidates:
+          - "results/{upstream_run_id}/**/*.json"
+      full:
+        max_workers: 4
+        run_command: "{venv_python} -m pipeline --exp-name {upstream_run_id} --mcp filesystem --tasks all --models {model_name} --k 1"
+        post_run_commands:
+          - "{venv_python} -m src.aggregators.aggregate_results --exp-name {upstream_run_id}"
+        summary_candidates:
+          - "results/{upstream_run_id}/**/*.json"

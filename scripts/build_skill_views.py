@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from common import append_run_note, ensure_run_dirs, load_config, logger
+from common import append_run_note, ensure_path_is_new, ensure_run_dirs, load_config, logger
 
 
 def compact_lines(text: str, limit: int) -> str:
@@ -57,9 +57,15 @@ def main() -> None:
 
     out_dir = run_dir / 'skill_views'
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / 'full.md').write_text(full + '\n', encoding='utf-8')
-    (out_dir / 'summary.md').write_text(summary + '\n', encoding='utf-8')
-    (out_dir / 'tool_only.md').write_text(tool_only + '\n', encoding='utf-8')
+    full_path = out_dir / 'full.md'
+    summary_path = out_dir / 'summary.md'
+    tool_only_path = out_dir / 'tool_only.md'
+    ensure_path_is_new(full_path, 'full skill view')
+    ensure_path_is_new(summary_path, 'summary skill view')
+    ensure_path_is_new(tool_only_path, 'tool-only skill view')
+    full_path.write_text(full + '\n', encoding='utf-8')
+    summary_path.write_text(summary + '\n', encoding='utf-8')
+    tool_only_path.write_text(tool_only + '\n', encoding='utf-8')
     append_run_note(run_dir, ['Built skill views: full.md, summary.md, tool_only.md.'])
     logger.info('Wrote skill views to %s', out_dir)
 

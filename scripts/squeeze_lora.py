@@ -9,7 +9,7 @@ from typing import Any
 import torch
 from safetensors.torch import load_file, save_file
 
-from common import append_run_note, ensure_run_dirs, load_config, logger
+from common import append_run_note, ensure_path_is_new, ensure_run_dirs, load_config, logger
 
 
 def randomized_svd(matrix: torch.Tensor, rank: int, oversample: int = 8, n_iter: int = 2) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -31,6 +31,9 @@ def randomized_svd(matrix: torch.Tensor, rank: int, oversample: int = 8, n_iter:
 
 
 def squeeze_pair(a: torch.Tensor, b: torch.Tensor, target_rank: int, oversample: int, n_iter: int) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+    max_rank = min(a.shape[0], a.shape[1], b.shape[0], b.shape[1])
+    if target_rank > max_rank:
+        raise ValueError(f'target_rank={target_rank} exceeds the maximum representable rank {max_rank} for a layer with A={tuple(a.shape)} and B={tuple(b.shape)}')
     delta = b @ a
     orig_norm = float(torch.linalg.norm(delta).item())
     u, s, vh = randomized_svd(delta, target_rank, oversample=oversample, n_iter=n_iter)
@@ -58,10 +61,14 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if not cfg.get('lora_squeeze', {}).get('enabled', True):
+        logger.info('LoRA squeeze disabled')
+        return
     run_dir = ensure_run_dirs(cfg)
     src_dir = run_dir / args.source_subdir
     dst_dir = run_dir / args.output_subdir
-    dst_dir.mkdir(parents=True, exist_ok=True)
+    ensure_path_is_new(dst_dir, 'squeezed adapter directory')
+    dst_dir.mkdir(parents=True, exist_ok=False)
     adapter_path = src_dir / 'adapter_model.safetensors'
     if not adapter_path.exists():
         raise FileNotFoundError(f'Missing adapter: {adapter_path}')

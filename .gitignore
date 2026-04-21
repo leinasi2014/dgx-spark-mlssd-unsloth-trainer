@@ -5,6 +5,10 @@ __pycache__/
 .env.*
 runs/
 dist/
+benchmarks/agent_evals/.venv/
+benchmarks/agent_evals/.cache/
+benchmarks/agent_evals/.external/
+benchmarks/agent_evals/runs/
 *.safetensors
 *.ckpt
 *.pt

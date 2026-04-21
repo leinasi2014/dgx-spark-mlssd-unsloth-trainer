@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-evals"
+version = "0.1.0"
+description = "Config-driven wrappers for public coding-agent benchmarks."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "PyYAML>=6.0,<7.0",
+]
+
+[project.scripts]
+agent-evals = "agent_evals.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent_evals*"]

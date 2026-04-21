@@ -6,7 +6,9 @@ cd "$PROJECT_ROOT"
 
 : "${PYTHON_BIN:=python3}"
 : "${ML_SSD_GIT_URL:=https://github.com/apple/ml-ssd.git}"
-: "${ML_SSD_COMMIT:=main}"
+: "${ML_SSD_COMMIT:=15c429241729df2704f926bd3e6ac19cf502f245}"
+: "${INSTALL_ML_SSD:=0}"
+: "${ML_SSD_CHECKOUT_DIR:=third_party/ml-ssd}"
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   echo "[err] python executable not found: $PYTHON_BIN" >&2
@@ -26,26 +28,34 @@ fi
 if [[ ! -d .venv ]]; then
   "$PYTHON_BIN" -m venv .venv
 fi
-source .venv/bin/activate
-
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r requirements.txt
-
-mkdir -p third_party
-if [[ ! -d third_party/ml-ssd/.git ]]; then
-  git clone "$ML_SSD_GIT_URL" third_party/ml-ssd
-fi
-(
-  cd third_party/ml-ssd
-  git fetch --all --tags --prune
-  git checkout "$ML_SSD_COMMIT"
-)
-
-if [[ -f third_party/ml-ssd/pyproject.toml ]]; then
-  python -m pip install -e third_party/ml-ssd
+VENV_PYTHON="$PROJECT_ROOT/.venv/bin/python"
+if [[ ! -x "$VENV_PYTHON" ]]; then
+  echo "[err] expected virtualenv python at $VENV_PYTHON" >&2
+  exit 1
 fi
 
-python - <<'PY2'
+"$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel
+"$VENV_PYTHON" -m pip install -r requirements.txt
+
+if [[ "$INSTALL_ML_SSD" == "1" ]]; then
+  mkdir -p "$(dirname "$ML_SSD_CHECKOUT_DIR")"
+  if [[ ! -d "$ML_SSD_CHECKOUT_DIR/.git" ]]; then
+    git clone "$ML_SSD_GIT_URL" "$ML_SSD_CHECKOUT_DIR"
+  fi
+  (
+    cd "$ML_SSD_CHECKOUT_DIR"
+    git fetch --all --tags --prune
+    git checkout "$ML_SSD_COMMIT"
+  )
+
+  if [[ -f "$ML_SSD_CHECKOUT_DIR/pyproject.toml" ]]; then
+    "$VENV_PYTHON" -m pip install -e "$ML_SSD_CHECKOUT_DIR"
+  fi
+else
+  echo "[info] skipping optional ml-ssd checkout (set INSTALL_ML_SSD=1 to enable)"
+fi
+
+"$VENV_PYTHON" - <<'PY2'
 import platform
 import shutil
 import sys
@@ -61,3 +71,5 @@ try:
 except Exception as exc:
     print('[env] torch_check_failed=', exc)
 PY2
+
+echo "[next] use $VENV_PYTHON for subsequent commands"

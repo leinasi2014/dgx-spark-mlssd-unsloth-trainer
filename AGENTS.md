@@ -4,19 +4,33 @@ This repository is designed for an autonomous coding agent operating on DGX Spar
 
 ## Primary objective
 
-Operate one of two supported training plans safely and reproducibly:
+Operate one of the supported training plans safely and reproducibly:
 
-1. **Sequential mode**
+1. **Code only**
+   - prepare SSD-backed code data
+   - train the code adapter
+   - optionally squeeze and recover it if those stages are enabled
+   - evaluate the resulting code adapter
+
+2. **Code then skill0**
    - prepare SSD-backed code data
    - train code adapter first
    - build skill0 curriculum data
    - continue finetuning from the code adapter on skill0 data
    - squeeze, recover, and evaluate the final adapter
 
-2. **Mixed mode**
+3. **Code then agent**
+   - prepare SSD-backed code data
+   - train code adapter first
+   - prepare one agent-trajectory dataset from a configured upstream source
+   - continue finetuning from the code adapter on that agent dataset
+   - squeeze, recover, and evaluate the final adapter
+
+4. **Mixed sources**
    - prepare SSD-backed code data
    - build skill0 curriculum data
-   - mix the two datasets by configured weights
+   - optionally prepare extra upstream agent datasets
+   - mix the selected datasets by configured weights
    - train one mixed adapter
    - squeeze, recover, and evaluate the final adapter
 
@@ -24,8 +38,9 @@ Operate one of two supported training plans safely and reproducibly:
 
 - Do not fine-tune the MoE router layer.
 - Prefer the default target modules from `configs/train.example.yaml`, which cover gated-attention, DeltaNet projections, and shared-expert MLP layers.
-- Keep response-only masking enabled for the code stage.
+- Keep response-only masking enabled for training.
 - Do not add verifier-based filtering, reward models, or RL into the SSD stage.
+- Keep the default code-stage source aligned with `apple/ml-ssd`: Hugging Face problem dataset input plus upstream-style `stdin` / `function` prompt templates.
 - Treat the skill0 stage as **skill-conditioned supervised finetuning**, not as a claim of reproducing the full SKILL0 RL stack.
 - Do not overwrite artifacts in `runs/` unless explicitly asked.
 
@@ -33,35 +48,48 @@ Operate one of two supported training plans safely and reproducibly:
 
 ```bash
 bash scripts/bootstrap_dgx_spark.sh
+# optional upstream checkout for comparison/debugging:
+# INSTALL_ML_SSD=1 bash scripts/bootstrap_dgx_spark.sh
 cp configs/train.example.yaml configs/train.local.yaml
-python scripts/prepare_ssd_data.py --config configs/train.local.yaml --prepare-prompts --write-ssd-config
-python scripts/generate_ssd_local.py --config configs/train.local.yaml
-python scripts/prepare_ssd_data.py --config configs/train.local.yaml --convert-raw runs/<run_name>/raw_ssd_outputs.jsonl
-python scripts/run_training_plan.py --config configs/train.local.yaml --mode sequential --prepare-only
+# edit configs/train.local.yaml and set a unique run_name before continuing
+.venv/bin/python scripts/prepare_ssd_data.py --config configs/train.local.yaml --prepare-prompts --write-ssd-config
+.venv/bin/python scripts/generate_ssd_local.py --config configs/train.local.yaml
+.venv/bin/python scripts/prepare_ssd_data.py --config configs/train.local.yaml --convert-raw runs/your-run-name/raw_ssd_outputs.jsonl
 ```
+
+Then choose exactly one plan-specific prepare command from the next section for the same `run_name`.
 
 ## Mode-specific commands
 
-### Sequential mode
+### Code only
 
 ```bash
-python scripts/train_unsloth_lora.py --config configs/train.local.yaml --dataset-path runs/<run_name>/ssd_train.jsonl --output-subdir adapter_code_high_rank
-python scripts/train_unsloth_lora.py --config configs/train.local.yaml --dataset-path runs/<run_name>/skill0_train.jsonl --output-subdir adapter_skill0_high_rank --init-adapter runs/<run_name>/adapter_code_high_rank
-python scripts/squeeze_lora.py --config configs/train.local.yaml --source-subdir adapter_skill0_high_rank --output-subdir adapter_skill0_squeezed
-python scripts/recover_after_squeeze.py --config configs/train.local.yaml --dataset-path runs/<run_name>/skill0_train.jsonl --source-subdir adapter_skill0_squeezed --output-subdir adapter_skill0_recovered
-python scripts/evaluate_codegen.py --config configs/train.local.yaml --adapter-subdir adapter_skill0_recovered
+.venv/bin/python scripts/run_training_plan.py --config configs/train.local.yaml --plan code_only --prepare-only
+bash runs/your-run-name/code_only_plan.sh
 ```
 
-### Mixed mode
+### Code then skill0
 
 ```bash
-python scripts/run_training_plan.py --config configs/train.local.yaml --mode mixed --prepare-only
-python scripts/train_unsloth_lora.py --config configs/train.local.yaml --dataset-path runs/<run_name>/mixed_train.jsonl --output-subdir adapter_mixed_high_rank
-python scripts/squeeze_lora.py --config configs/train.local.yaml --source-subdir adapter_mixed_high_rank --output-subdir adapter_mixed_squeezed
-python scripts/recover_after_squeeze.py --config configs/train.local.yaml --dataset-path runs/<run_name>/mixed_train.jsonl --source-subdir adapter_mixed_squeezed --output-subdir adapter_mixed_recovered
-python scripts/evaluate_codegen.py --config configs/train.local.yaml --adapter-subdir adapter_mixed_recovered
+.venv/bin/python scripts/run_training_plan.py --config configs/train.local.yaml --plan code_then_skill0 --prepare-only
+bash runs/your-run-name/code_then_skill0_plan.sh
+```
+
+### Code then agent
+
+```bash
+# enable data_sources.<your_source>.enabled=true and set training_plan.agent.source first
+.venv/bin/python scripts/run_training_plan.py --config configs/train.local.yaml --plan code_then_agent --prepare-only
+bash runs/your-run-name/code_then_agent_plan.sh
+```
+
+### Mixed sources
+
+```bash
+.venv/bin/python scripts/run_training_plan.py --config configs/train.local.yaml --plan mixed_sources --prepare-only
+bash runs/your-run-name/mixed_sources_plan.sh
 ```
 
 ## Reference policy
 
-Every operator-facing explanation that mentions upstream methods should point to `docs/references.md`, which contains the papers and repository URLs for Apple SSD, Unsloth, LoRA-Squeeze, and SKILL0.
+Every operator-facing explanation that mentions upstream methods should point to `docs/references.md`, which contains the papers and upstream repository URLs where available for Apple SSD, Unsloth, LoRA-Squeeze, SKILL0, and the default benchmark sources used by this repository.

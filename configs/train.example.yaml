@@ -1,4 +1,4 @@
-run_name: carnice-qwen36-code-boost-v3
+run_name: example-run-name-change-me
 
 model:
   base_model: samuelcardillo/Carnice-Qwen3.6-MoE-35B-A3B
@@ -11,37 +11,89 @@ model:
 paths:
   project_root: ..
   output_root: runs
-  prompt_dataset: data/prompts/code_prompts.jsonl
   skill_task_dataset: data/skill0/skill_tasks.jsonl
-  ssd_train_jsonl: runs/${run_name}/ssd_train.jsonl
-  skill0_train_jsonl: runs/${run_name}/skill0_train.jsonl
-  mixed_train_jsonl: runs/${run_name}/mixed_train.jsonl
+  ssd_train_jsonl: ${paths.output_root}/${run_name}/ssd_train.jsonl
+  skill0_train_jsonl: ${paths.output_root}/${run_name}/skill0_train.jsonl
+  mixed_train_jsonl: ${paths.output_root}/${run_name}/mixed_train.jsonl
   eval_dataset: data/eval/code_eval.jsonl
-  ml_ssd_repo: third_party/ml-ssd
+
+data_sources:
+  rstar_coder_seed_sft:
+    enabled: true
+    family: problem_code
+    provider: huggingface
+    adapter: rstar_coder
+    dataset:
+      name: microsoft/rStar-Coder
+      config: seed_sft
+      split: train
+    limit: 0
+
+  coderforge_preview:
+    enabled: false
+    family: agent_trajectory
+    provider: huggingface
+    adapter: coderforge
+    dataset:
+      name: togethercomputer/CoderForge-Preview
+      config: trajectories
+      split: filtered_reward1
+    min_reward: 1.0
+    limit: 0
+
+  litecoder_terminal_rl_preview:
+    enabled: false
+    family: agent_trajectory
+    provider: huggingface
+    adapter: litecoder_terminal
+    dataset:
+      name: Lite-Coder/LiteCoder-Terminal-RL-preview
+      config: default
+      split: train
+    limit: 0
+    notes:
+      - LiteCoder-Terminal-RL-preview currently ships Harbor environments.
+      - This repository will fail fast if you try to use it as direct SFT data without a dedicated adapter.
 
 ssd:
   model_for_generation: samuelcardillo/Carnice-Qwen3.6-MoE-35B-A3B
-  samples_per_prompt: 4
-  temperature: 1.0
+  temperature: 1.5
   top_p: 0.8
   top_k: 20
   repetition_penalty: 1.0
-  max_new_tokens: 4096
+  max_new_tokens: 16384
+  max_model_len: ${model.max_seq_length}
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.85
   filter_shortest_percent: 10
+  templates:
+    template_root: ${paths.project_root}/scripts/ml_ssd_templates
 
 training_plan:
-  mode: sequential
-  sequential:
-    code_output_subdir: adapter_code_high_rank
-    skill_output_subdir: adapter_skill0_high_rank
+  plan: code_then_skill0
+  code:
+    source: rstar_coder_seed_sft
+    output_subdir: adapter_code_high_rank
+    squeezed_output_subdir: adapter_code_squeezed
+    recovered_output_subdir: adapter_code_recovered
+  skill0:
+    output_subdir: adapter_skill0_high_rank
     squeezed_output_subdir: adapter_skill0_squeezed
     recovered_output_subdir: adapter_skill0_recovered
+  agent:
+    source: coderforge_preview
+    output_subdir: adapter_agent_high_rank
+    squeezed_output_subdir: adapter_agent_squeezed
+    recovered_output_subdir: adapter_agent_recovered
   mixed:
     output_subdir: adapter_mixed_high_rank
     squeezed_output_subdir: adapter_mixed_squeezed
     recovered_output_subdir: adapter_mixed_recovered
+    sources:
+      - source: code
+        weight: 0.7
+      - source: skill0
+        weight: 0.3
 
 training:
   stage: sft
@@ -100,10 +152,6 @@ skill0:
         summary: 0.3
         tool_only: 0.2
         zero: 0.4
-  mixed_weights:
-    code: 0.7
-    skill0: 0.3
-
 recovery:
   enabled: true
   max_steps_ratio: 0.08
@@ -116,6 +164,22 @@ lora_squeeze:
   oversample_rank: 8
   power_iterations: 2
   save_as_safetensors: true
+
+evaluation:
+  public:
+    dataset_name: livecodebench/code_generation_lite
+    version_tag: release_v6
+    split: test
+    contest_months: ['2025-02', '2025-03', '2025-04', '2025-05']
+    n_repeat: 1
+    pass_k: [1]
+    temperature: 0.6
+    top_p: 0.95
+    max_tokens: 8192
+    limit: 0
+  local_smoke:
+    enabled: true
+    dataset_path: ${paths.eval_dataset}
 
 inference:
   temperature_sweep: [0.2, 0.4, 0.6, 0.8, 0.9]

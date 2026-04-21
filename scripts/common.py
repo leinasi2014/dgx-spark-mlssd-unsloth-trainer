@@ -12,6 +12,8 @@ import yaml
 
 LOG_FORMAT = '%(asctime)s | %(levelname)s | %(message)s'
 ENV_PATTERN = re.compile(r'\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}')
+TEMPLATE_PATTERN = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_\.]*)\}')
+RUN_NAME_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 
 
 def setup_logging(level: str = 'INFO') -> None:
@@ -30,9 +32,19 @@ def load_config(config_path: str) -> Dict[str, Any]:
     data.setdefault('_meta', {})
     data['_meta']['config_path'] = str(config_file)
     data['_meta']['config_dir'] = str(config_file.parent)
-    resolved = _resolve_templates(data, data)
+    resolved = data
+    for _ in range(8):
+        updated = _resolve_templates(resolved, resolved)
+        if updated == resolved:
+            break
+        resolved = updated
+    _validate_run_name(resolved.get('run_name', ''))
     _normalize_paths(resolved)
-    return resolved
+    final = _resolve_templates(data, resolved)
+    _validate_run_name(final.get('run_name', ''))
+    _normalize_paths(final)
+    _normalize_additional_paths(final)
+    return final
 
 
 def _resolve_templates(value: Any, root: Dict[str, Any]) -> Any:
@@ -41,14 +53,41 @@ def _resolve_templates(value: Any, root: Dict[str, Any]) -> Any:
     if isinstance(value, list):
         return [_resolve_templates(v, root) for v in value]
     if isinstance(value, str):
-        out = value.replace('${run_name}', str(root.get('run_name', '')))
-
-        def repl(match: re.Match[str]) -> str:
+        def env_repl(match: re.Match[str]) -> str:
             env_name = match.group(1)
-            return os.environ.get(env_name, '')
+            if env_name not in os.environ:
+                raise KeyError(f'Missing required environment variable template: env:{env_name}')
+            return os.environ[env_name]
 
-        return ENV_PATTERN.sub(repl, out)
+        out = ENV_PATTERN.sub(env_repl, value)
+
+        def dotted_repl(match: re.Match[str]) -> str:
+            token = match.group(1)
+            resolved = _lookup_template_value(root, token)
+            if resolved is None:
+                raise KeyError(f'Missing required config template: {token}')
+            return str(resolved)
+
+        return TEMPLATE_PATTERN.sub(dotted_repl, out)
     return value
+
+
+def _lookup_template_value(root: Dict[str, Any], token: str) -> Any:
+    current: Any = root
+    for part in token.split('.'):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _validate_run_name(run_name: Any) -> None:
+    value = str(run_name or '')
+    if not RUN_NAME_PATTERN.fullmatch(value):
+        raise ValueError(
+            'run_name must be a simple path-safe slug containing only letters, digits, ".", "_" or "-". '
+            f'Got: {value!r}'
+        )
 
 
 def _normalize_paths(cfg: Dict[str, Any]) -> None:
@@ -62,11 +101,39 @@ def _normalize_paths(cfg: Dict[str, Any]) -> None:
         else:
             project_root = (cfg_dir / project_root).resolve()
     paths['project_root'] = str(project_root)
-    for key in ['output_root', 'prompt_dataset', 'ssd_train_jsonl', 'eval_dataset', 'ml_ssd_repo']:
-        if key not in paths:
+    for key, raw_value in list(paths.items()):
+        if key == 'project_root' or not isinstance(raw_value, str):
             continue
-        value = Path(paths[key])
+        value = Path(raw_value)
+        if not value.is_absolute() and raw_value[:1] in {'/', '\\'}:
+            raise ValueError(f'Path {key} must be relative to project_root or fully qualified, not drive-ambiguous rooted path: {raw_value!r}')
         paths[key] = str((project_root / value).resolve()) if not value.is_absolute() else str(value)
+
+
+def _normalize_additional_paths(cfg: Dict[str, Any]) -> None:
+    project_root = Path(cfg['paths']['project_root'])
+    nested_paths = [
+        ('ssd', 'templates', 'template_root'),
+        ('evaluation', 'local_smoke', 'dataset_path'),
+    ]
+    for path_parts in nested_paths:
+        current: Any = cfg
+        for part in path_parts[:-1]:
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(part)
+        if not isinstance(current, dict):
+            continue
+        key = path_parts[-1]
+        raw_value = current.get(key)
+        if not isinstance(raw_value, str):
+            continue
+        value = Path(raw_value)
+        if not value.is_absolute() and raw_value[:1] in {'/', '\\'}:
+            dotted = '.'.join(path_parts)
+            raise ValueError(f'Path {dotted} must be relative to project_root or fully qualified, not drive-ambiguous rooted path: {raw_value!r}')
+        current[key] = str((project_root / value).resolve()) if not value.is_absolute() else str(value)
 
 
 def ensure_run_dirs(cfg: Dict[str, Any]) -> Path:
@@ -74,6 +141,14 @@ def ensure_run_dirs(cfg: Dict[str, Any]) -> Path:
     run_dir = output_root / cfg['run_name']
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
+
+
+def ensure_path_is_new(path: Path, description: str) -> None:
+    if path.exists():
+        raise FileExistsError(
+            f'Refusing to overwrite existing {description}: {path}. '
+            'Choose a new run_name or remove the artifact explicitly.'
+        )
 
 
 def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
@@ -137,21 +212,18 @@ def maybe_enable_response_only(trainer: Any, tokenizer: Any, cfg: Dict[str, Any]
     instruction_part, response_part = response_markers(cfg)
     chat_template = getattr(tokenizer, 'chat_template', None) or ''
     if chat_template and instruction_part.strip() not in chat_template:
-        logger.warning('Response-only masking marker for user not found in tokenizer chat template; leaving trainer unchanged.')
-        return trainer
+        raise RuntimeError('Response-only masking marker for user not found in tokenizer chat template.')
     if chat_template and response_part.strip() not in chat_template:
-        logger.warning('Response-only masking marker for assistant not found in tokenizer chat template; leaving trainer unchanged.')
-        return trainer
+        raise RuntimeError('Response-only masking marker for assistant not found in tokenizer chat template.')
     try:
         from unsloth.chat_templates import train_on_responses_only
         return train_on_responses_only(trainer, instruction_part=instruction_part, response_part=response_part)
     except Exception as exc:
-        logger.warning('Response-only masking unavailable: %s', exc)
-        return trainer
+        raise RuntimeError(f'Response-only masking unavailable: {exc}') from exc
 
 
-def effective_optimizer_steps(n_examples: int, per_device_batch_size: int, grad_accum: int) -> int:
-    per_step = max(1, per_device_batch_size) * max(1, grad_accum)
+def effective_optimizer_steps(n_examples: int, per_device_batch_size: int, grad_accum: int, world_size: int = 1) -> int:
+    per_step = max(1, per_device_batch_size) * max(1, grad_accum) * max(1, world_size)
     return max(1, math.ceil(n_examples / per_step))
 
 

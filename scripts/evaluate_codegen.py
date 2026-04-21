@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from transformers import set_seed
 
-from common import choose_unsloth_loader, ensure_run_dirs, load_config, load_jsonl, logger
+from common import choose_unsloth_loader, ensure_path_is_new, ensure_run_dirs, load_config, load_jsonl, logger
 
 FENCE_RE = re.compile(r'```(?:python)?\n(.*?)```', re.DOTALL | re.IGNORECASE)
 
@@ -32,22 +33,44 @@ def extract_python(text: str) -> str:
     return matches[0].strip() if matches else text.strip()
 
 
-def resolve_adapter(run_dir: Path, explicit: str | None) -> tuple[Path | None, str]:
+def preferred_eval_family(cfg: dict[str, Any]) -> str:
+    training_plan = cfg.get('training_plan', {})
+    plan = str(training_plan.get('plan') or '').strip().lower()
+    legacy_mode = str(training_plan.get('mode', 'sequential')).strip().lower()
+    if plan == 'mixed_sources':
+        return 'mixed'
+    if plan == 'code_then_agent':
+        return 'agent'
+    if plan == 'code_only':
+        return 'code'
+    if plan == 'code_then_skill0':
+        return 'skill0'
+    if legacy_mode == 'mixed':
+        return 'mixed'
+    return 'skill0'
+
+
+def resolve_adapter(run_dir: Path, explicit: str | None, preferred_family: str | None = None) -> tuple[Path | None, str]:
     if explicit:
         adapter_dir = run_dir / explicit
-        return (adapter_dir if (adapter_dir / 'adapter_config.json').exists() else None), explicit
-    for candidate in [
-        'adapter_skill0_recovered',
-        'adapter_mixed_recovered',
-        'adapter_recovered',
-        'adapter_skill0_squeezed',
-        'adapter_mixed_squeezed',
-        'adapter_squeezed',
-        'adapter_skill0_high_rank',
-        'adapter_mixed_high_rank',
-        'adapter_code_high_rank',
-        'adapter_high_rank',
-    ]:
+        if not (adapter_dir / 'adapter_config.json').exists():
+            raise FileNotFoundError(f'Explicit adapter was not found or is incomplete: {adapter_dir}')
+        return adapter_dir, explicit
+    candidate_groups = {
+        'mixed': ['adapter_mixed_recovered', 'adapter_mixed_squeezed', 'adapter_mixed_high_rank'],
+        'agent': ['adapter_agent_recovered', 'adapter_agent_squeezed', 'adapter_agent_high_rank'],
+        'skill0': ['adapter_skill0_recovered', 'adapter_skill0_squeezed', 'adapter_skill0_high_rank'],
+        'code': ['adapter_code_recovered', 'adapter_code_squeezed', 'adapter_code_high_rank'],
+        'generic': ['adapter_recovered', 'adapter_squeezed', 'adapter_high_rank'],
+    }
+    order = {
+        'mixed': ['mixed', 'skill0', 'agent', 'code', 'generic'],
+        'agent': ['agent', 'skill0', 'mixed', 'code', 'generic'],
+        'code': ['code', 'skill0', 'agent', 'mixed', 'generic'],
+        'skill0': ['skill0', 'mixed', 'agent', 'code', 'generic'],
+    }.get(preferred_family or 'skill0', ['skill0', 'mixed', 'agent', 'code', 'generic'])
+    candidates = [candidate for family in order for candidate in candidate_groups[family]]
+    for candidate in candidates:
         adapter_dir = run_dir / candidate
         if (adapter_dir / 'adapter_config.json').exists():
             return adapter_dir, candidate
@@ -62,19 +85,27 @@ def load_model_and_tokenizer(cfg: dict[str, Any], run_dir: Path, adapter_subdir:
         load_in_4bit=cfg['model']['load_in_4bit'],
         trust_remote_code=cfg['model'].get('trust_remote_code', True),
     )
-    adapter_dir, tag = resolve_adapter(run_dir, adapter_subdir)
+    adapter_dir, tag = resolve_adapter(run_dir, adapter_subdir, preferred_eval_family(cfg))
     if adapter_dir is not None:
         from peft import PeftModel
         model = PeftModel.from_pretrained(model, str(adapter_dir), is_trainable=False)
     return model.eval(), tokenizer, tag
 
 
+def model_input_device(model: Any) -> Any:
+    device = getattr(model, 'device', None)
+    if device is not None:
+        return device
+    try:
+        return next(model.parameters()).device
+    except Exception:
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
+
+
 def generate_completion(model: Any, tokenizer: Any, prompt: str, temperature: float, top_p: float, max_new_tokens: int) -> str:
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = model_input_device(model)
     inputs = tokenizer(prompt, return_tensors='pt')
     inputs = {k: v.to(device) for k, v in inputs.items()}
-    if hasattr(model, 'to'):
-        model = model.to(device)
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -88,12 +119,21 @@ def generate_completion(model: Any, tokenizer: Any, prompt: str, temperature: fl
     return tokenizer.decode(generated, skip_special_tokens=True)
 
 
+def local_smoke_dataset_path(cfg: dict[str, Any]) -> Path:
+    configured = cfg.get('evaluation', {}).get('local_smoke', {}).get('dataset_path')
+    return Path(str(configured or cfg['paths']['eval_dataset']))
+
+
 def run_tests(code: str, tests: list[str], timeout_seconds: int = 10) -> tuple[bool, str]:
     with tempfile.TemporaryDirectory(prefix='eval_codegen_') as tmpdir:
         test_file = Path(tmpdir) / 'candidate_test.py'
         payload = code.rstrip() + '\n\n' + '\n'.join(tests) + '\n'
         test_file.write_text(payload, encoding='utf-8')
-        proc = subprocess.run([sys.executable, str(test_file)], capture_output=True, text=True, timeout=timeout_seconds)
+        try:
+            proc = subprocess.run([sys.executable, str(test_file)], capture_output=True, text=True, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            output = (exc.stdout or '') + (exc.stderr or '') + f'\nTimed out after {timeout_seconds} seconds.'
+            return False, output[-4000:]
         output = (proc.stdout or '') + (proc.stderr or '')
         return proc.returncode == 0, output[-4000:]
 
@@ -102,18 +142,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='Evaluate a coding adapter with executable Python tests.')
     parser.add_argument('--config', required=True)
     parser.add_argument('--adapter-subdir', default=None)
+    parser.add_argument('--output-subdir', default='eval')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=3407)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     run_dir = ensure_run_dirs(cfg)
-    eval_rows = load_jsonl(Path(cfg['paths']['eval_dataset']))
+    set_seed(args.seed)
+    eval_rows = load_jsonl(local_smoke_dataset_path(cfg))
     if args.limit > 0:
         eval_rows = eval_rows[:args.limit]
 
-    out_dir = run_dir / 'eval'
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = run_dir / args.output_subdir
+    ensure_path_is_new(out_dir, 'evaluation output directory')
+    out_dir.mkdir(parents=True, exist_ok=False)
 
     if args.dry_run:
         summary = {
@@ -121,6 +165,7 @@ def main() -> None:
             'temperatures': cfg['inference']['temperature_sweep'],
             'n_tasks': len(eval_rows),
             'adapter_subdir': args.adapter_subdir,
+            'seed': args.seed,
             'status': 'dry-run',
         }
         (out_dir / 'summary.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
@@ -128,7 +173,7 @@ def main() -> None:
         return
 
     model, tokenizer, eval_target = load_model_and_tokenizer(cfg, run_dir, args.adapter_subdir)
-    aggregate: dict[str, Any] = {'run_name': cfg['run_name'], 'eval_target': eval_target, 'temperatures': {}}
+    aggregate: dict[str, Any] = {'run_name': cfg['run_name'], 'eval_target': eval_target, 'seed': args.seed, 'temperatures': {}}
 
     for temperature in cfg['inference']['temperature_sweep']:
         passed = 0
